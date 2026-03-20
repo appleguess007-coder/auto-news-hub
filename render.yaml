@@ -5,6 +5,7 @@ services:
     runtime: docker
     plan: starter # $7/mo, always-on, 512MB RAM
     region: singapore
+    healthCheckPath: /healthz
     envVars:
       - key: TZ
         value: Asia/Shanghai

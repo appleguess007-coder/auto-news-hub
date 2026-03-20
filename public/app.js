@@ -305,10 +305,28 @@
   }
 
   // === INIT ===
-  fetchNews(false);
+  // Auto-retry: if first load returns 0 articles, poll every 8s until data arrives
+  let retryCount = 0;
+  const MAX_RETRIES = 30; // ~4 minutes of retrying
+  const origFetchNews = fetchNews;
+
+  async function fetchNewsWithRetry(append) {
+    await origFetchNews(append);
+    if (!append && state.articles.length === 0 && retryCount < MAX_RETRIES) {
+      retryCount++;
+      console.log(`[retry] 暂无数据, ${retryCount}/${MAX_RETRIES} 次重试中...`);
+      setTimeout(() => fetchNewsWithRetry(false), 8000);
+    } else if (state.articles.length > 0) {
+      retryCount = 0;
+    }
+  }
+
+  fetchNewsWithRetry(false);
   fetchStatus();
   connectSSE();
   setInterval(tickClock, 1000);
   setInterval(fetchStatus, 30000);
+  // Periodic full refresh every 5 minutes as SSE fallback
+  setInterval(() => fetchNews(false), 300000);
   tickClock();
 })();
