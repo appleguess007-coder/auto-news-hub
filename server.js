@@ -107,6 +107,29 @@ cron.schedule('*/5 * * * *', () => {
   manager.runAll();
 });
 
+// === Self-ping to prevent Render free tier sleep ===
+// Render auto-sets RENDER_EXTERNAL_URL for all web services.
+// Ping our own public URL every 13 minutes so Render's proxy sees inbound traffic.
+const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
+if (RENDER_URL) {
+  const https = require('https');
+  const http = require('http');
+  const pingLib = RENDER_URL.startsWith('https') ? https : http;
+
+  setInterval(() => {
+    pingLib.get(`${RENDER_URL}/healthz`, (res) => {
+      console.log(`[keep-alive] self-ping → ${res.statusCode}`);
+      res.resume(); // drain response
+    }).on('error', (e) => {
+      console.warn(`[keep-alive] self-ping failed: ${e.message}`);
+    });
+  }, 13 * 60 * 1000); // every 13 minutes
+
+  console.log(`[keep-alive] 自保活已启用, 每13分钟ping ${RENDER_URL}/healthz`);
+} else {
+  console.log('[keep-alive] 未检测到RENDER_EXTERNAL_URL, 自保活未启用(非Render环境)');
+}
+
 // --- Start ---
 app.listen(PORT, '0.0.0.0', async () => {
   console.log(`🚗 汽车新闻聚合平台运行在 http://localhost:${PORT}`);
