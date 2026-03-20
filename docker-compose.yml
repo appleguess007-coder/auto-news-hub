@@ -1,0 +1,20 @@
+services:
+  autopulse:
+    build: .
+    container_name: autopulse
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - autopulse-data:/app/data
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - TZ=Asia/Shanghai
+    # Chromium in Docker needs these
+    security_opt:
+      - seccomp=unconfined
+    shm_size: '1gb'
+
+volumes:
+  autopulse-data:
