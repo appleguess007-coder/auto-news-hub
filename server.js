@@ -40,6 +40,11 @@ app.get('/api/status', (_req, res) => {
   res.json(manager.getStatus());
 });
 
+// Health check for Render / uptime monitors
+app.get('/healthz', (_req, res) => {
+  res.json({ ok: true, uptime: process.uptime() });
+});
+
 // Manual refresh trigger
 app.post('/api/refresh', async (_req, res) => {
   manager.runAll();

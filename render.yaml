@@ -1,0 +1,14 @@
+# https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: auto-news-hub
+    runtime: docker
+    plan: starter # $7/mo, always-on, 512MB RAM
+    region: singapore
+    envVars:
+      - key: TZ
+        value: Asia/Shanghai
+    disk:
+      name: news-data
+      mountPath: /app/data
+      sizeGB: 1
