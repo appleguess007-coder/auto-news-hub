@@ -10,15 +10,18 @@ const PORT = process.env.PORT || 3000;
 const store = new NewsStore();
 const manager = new ScraperManager(store);
 
-// SSE clients
-const sseClients = new Set();
+// SSE clients — use a Map keyed by a numeric ID so we can log client count
+let _sseNextId = 0;
+const sseClients = new Map();
+
+// Cap SSE connections to avoid unbounded memory growth
+const SSE_MAX_CLIENTS = 20;
 
 app.use(express.static(path.join(__dirname, 'public')));
-app.use(express.json());
+app.use(express.json({ limit: '100kb' }));
 
 // --- API Routes ---
 
-// Get news with optional filters
 app.get('/api/news', (req, res) => {
   const { source, keyword, page = 1, limit = 50 } = req.query;
   const result = store.query({
@@ -30,57 +33,89 @@ app.get('/api/news', (req, res) => {
   res.json(result);
 });
 
-// Get available sources
 app.get('/api/sources', (_req, res) => {
   res.json(store.getSources());
 });
 
-// Get scraper status
 app.get('/api/status', (_req, res) => {
-  res.json(manager.getStatus());
+  res.json({
+    ...manager.getStatus(),
+    sseClients: sseClients.size,
+    uptime: process.uptime(),
+    memoryMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
+  });
 });
 
-// Health check for Render / uptime monitors
 app.get('/healthz', (_req, res) => {
   res.json({ ok: true, uptime: process.uptime() });
 });
 
-// Manual refresh trigger
 app.post('/api/refresh', async (_req, res) => {
-  manager.runAll();
+  // Fire and forget — don't await so the HTTP response returns immediately
+  manager.runAll().catch((e) => console.error('[refresh]', e.message));
   res.json({ ok: true, message: '刷新任务已触发' });
 });
 
 // SSE endpoint for push notifications
 app.get('/api/stream', (req, res) => {
+  if (sseClients.size >= SSE_MAX_CLIENTS) {
+    return res.status(503).json({ error: '连接数已达上限，请稍后重试' });
+  }
+
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     Connection: 'keep-alive',
+    // Prevent Render/nginx from buffering SSE
+    'X-Accel-Buffering': 'no',
   });
   res.write('data: {"type":"connected"}\n\n');
 
-  const client = { res };
-  sseClients.add(client);
-  req.on('close', () => sseClients.delete(client));
+  const clientId = _sseNextId++;
+  sseClients.set(clientId, res);
+  console.log(`[sse] client ${clientId} connected (total: ${sseClients.size})`);
+
+  // Send a keep-alive comment every 30s to prevent idle connection drops
+  const keepAlive = setInterval(() => {
+    res.write(': keep-alive\n\n');
+  }, 30000);
+
+  req.on('close', () => {
+    clearInterval(keepAlive);
+    sseClients.delete(clientId);
+    console.log(`[sse] client ${clientId} disconnected (total: ${sseClients.size})`);
+  });
 });
 
 // Broadcast new articles to SSE clients
 function broadcast(data) {
+  if (sseClients.size === 0) return;
   const msg = `data: ${JSON.stringify(data)}\n\n`;
-  for (const client of sseClients) {
-    client.res.write(msg);
+  for (const [id, res] of sseClients) {
+    try {
+      res.write(msg);
+    } catch (e) {
+      // Dead connection — remove it
+      sseClients.delete(id);
+    }
   }
 }
 
 // === Feishu batch buffer ===
-// Collect new articles across all scrapers in a single run, then send one Feishu message
+// Collect new articles across all scrapers in a single run, then send one Feishu message.
+// Use a plain array with a hard cap to avoid unbounded growth.
+const FEISHU_BUFFER_CAP = 500;
 let feishuBuffer = [];
 let feishuFlushTimer = null;
 
 function bufferForFeishu(articles) {
+  // Avoid spread operator on large arrays (stack overflow risk); use concat instead
+  const remaining = FEISHU_BUFFER_CAP - feishuBuffer.length;
+  if (remaining > 0) {
+    feishuBuffer = feishuBuffer.concat(articles.slice(0, remaining));
+  }
   console.log(`[feishu] 收到 ${articles.length} 条新增文章，加入推送缓冲区 (缓冲区现有 ${feishuBuffer.length} 条)`);
-  feishuBuffer.push(...articles);
+
   // Debounce: wait 30s after last scraper finishes, then flush
   clearTimeout(feishuFlushTimer);
   feishuFlushTimer = setTimeout(async () => {
@@ -103,13 +138,11 @@ store.onNewArticles = (articles) => {
 
 // --- Cron: every 5 minutes ---
 cron.schedule('*/5 * * * *', () => {
-  console.log(`[${new Date().toLocaleTimeString()}] 定时抓取开始...`);
-  manager.runAll();
+  console.log(`[${new Date().toLocaleTimeString()}] 定时抓取开始... (内存: ${Math.round(process.memoryUsage().rss / 1024 / 1024)} MB)`);
+  manager.runAll().catch((e) => console.error('[cron]', e.message));
 });
 
 // === Self-ping to prevent Render free tier sleep ===
-// Render auto-sets RENDER_EXTERNAL_URL for all web services.
-// Ping our own public URL every 13 minutes so Render's proxy sees inbound traffic.
 const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
 if (RENDER_URL) {
   const https = require('https');
@@ -119,11 +152,11 @@ if (RENDER_URL) {
   setInterval(() => {
     pingLib.get(`${RENDER_URL}/healthz`, (res) => {
       console.log(`[keep-alive] self-ping → ${res.statusCode}`);
-      res.resume(); // drain response
+      res.resume(); // drain response body to free socket
     }).on('error', (e) => {
       console.warn(`[keep-alive] self-ping failed: ${e.message}`);
     });
-  }, 13 * 60 * 1000); // every 13 minutes
+  }, 13 * 60 * 1000);
 
   console.log(`[keep-alive] 自保活已启用, 每13分钟ping ${RENDER_URL}/healthz`);
 } else {
